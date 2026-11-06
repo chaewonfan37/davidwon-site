@@ -71,25 +71,39 @@
     var stem = new T.Line(new T.BufferGeometry().setFromPoints([new T.Vector3(), new T.Vector3(0, 1, 0)]), new T.LineDashedMaterial({ color: 0xFF5A1F, dashSize: 0.008, gapSize: 0.009, transparent: true, opacity: 0.45 }));
     scene.add(tgt); scene.add(disc); scene.add(stem);
 
-    var ax = new T.Vector3(1, 0, 0), ay = new T.Vector3(0, 1, 0), tmp = new T.Vector3(), tmp2 = new T.Vector3();
+    var ax = new T.Vector3(1, 0, 0), ay = new T.Vector3(0, 1, 0);
     function fk(q, out) {
       out.copy(TIP).sub(P3).applyAxisAngle(ax, q[2]).add(P3);
       out.sub(P2).applyAxisAngle(ax, q[1]).add(P2);
       out.sub(P1).applyAxisAngle(ay, q[0]).add(P1);
       return out;
     }
+    // Closed-form IK (no iterations, so no dead spots at full stretch or at joint limits).
+    // J1 yaws about +Y; J2 and J3 pitch about +X in J1's frame, so the tip stays in the plane x = LAT there.
+    var LA = { y: P3.y - P2.y, z: P3.z - P2.z }, LB = { y: TIP.y - P3.y, z: TIP.z - P3.z };
+    var L1 = Math.hypot(LA.y, LA.z), L2 = Math.hypot(LB.y, LB.z);
+    var GAM = Math.atan2(LB.z, LB.y) - Math.atan2(LA.z, LA.y);   // elbow angle at q3 = 0 (CAD pose)
+    var BR = GAM >= 0 ? 1 : -1;                                  // stay on the CAD elbow branch
+    var LAT = TIP.x - P1.x;
+    function wrap(a) { while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a += 2 * Math.PI; return a; }
+    function clamp(v, lim) { return Math.max(lim[0], Math.min(lim[1], v)); }
+    function solve(p) {
+      var px = p.x - P1.x, pz = p.z - P1.z;
+      var rho = Math.max(Math.hypot(px, pz), Math.abs(LAT) + 0.02);
+      var zl = -Math.sqrt(rho * rho - LAT * LAT);
+      var q1 = clamp(wrap(Math.atan2(px, pz) - Math.atan2(LAT, zl)), LIM[0]);
+      var wy = p.y - P2.y, wz = zl - P2.z;
+      var r = Math.max(Math.abs(L1 - L2) + 0.01, Math.min((L1 + L2) * 0.985, Math.hypot(wy, wz)));
+      var c = Math.max(-0.995, Math.min(0.995, (r * r - L1 * L1 - L2 * L2) / (2 * L1 * L2)));
+      var q3 = clamp(BR * Math.acos(c) - GAM, LIM[2]);
+      var vy = LA.y + LB.y * Math.cos(q3) - LB.z * Math.sin(q3), vz = LA.z + LB.y * Math.sin(q3) + LB.z * Math.cos(q3);
+      var q2 = clamp(wrap(Math.atan2(wz, wy) - Math.atan2(vz, vy)), LIM[1]);
+      return [q1, q2, q3];
+    }
     var q = [0, 0, 0];
-    function ik(goal) {
-      for (var it = 0; it < 6; it++) {
-        var p = fk(q, tmp).clone(), e = goal.clone().sub(p);
-        if (e.length() < 1e-4) break;
-        var Jc = [];
-        for (var k = 0; k < 3; k++) { var qq = q.slice(); qq[k] += 1e-4; Jc.push(fk(qq, tmp2).clone().sub(p).multiplyScalar(1e4)); }
-        var m = function (r, c) { return Jc[0].getComponent(r) * Jc[0].getComponent(c) + Jc[1].getComponent(r) * Jc[1].getComponent(c) + Jc[2].getComponent(r) * Jc[2].getComponent(c) + (r === c ? 0.0004 : 0); };
-        var A = new T.Matrix3(); A.set(m(0, 0), m(0, 1), m(0, 2), m(1, 0), m(1, 1), m(1, 2), m(2, 0), m(2, 1), m(2, 2));
-        var y = e.clone().applyMatrix3(A.invert());
-        for (k = 0; k < 3; k++) { var d = Math.max(-0.25, Math.min(0.25, Jc[k].dot(y))); q[k] = Math.max(LIM[k][0], Math.min(LIM[k][1], q[k] + d)); }
-      }
+    function ik(goal, dt) {
+      var qt = solve(goal), k = dt > 0 ? 1 - Math.exp(-dt * 14) : 1;
+      for (var i = 0; i < 3; i++) q[i] += wrap(qt[i] - q[i]) * k;
       j1.rotation.y = q[0]; j2.rotation.x = q[1]; j3.rotation.x = q[2];
     }
 
@@ -112,17 +126,19 @@
       var r = stage.getBoundingClientRect();
       mouse.set((e.clientX - r.left) / r.width * 2 - 1, -(e.clientY - r.top) / r.height * 2 + 1);
       active = true; lastMove = performance.now();
-      if (reduce) requestAnimationFrame(frame);
+      if (reduce) kick();
     });
     hero.addEventListener('pointerleave', function () { active = false; });
     var reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
-    var visible = true, running = false;
-    if (window.IntersectionObserver) new IntersectionObserver(function (es) { visible = es[0].isIntersecting; if (visible && !running) requestAnimationFrame(frame); }).observe(hero);
+    var visible = true, running = false, ready = false;
+    // Single animation loop: every start goes through kick(), so it can never run twice.
+    function kick() { if (ready && !running) { running = true; last = performance.now(); requestAnimationFrame(frame); } }
+    if (window.IntersectionObserver) new IntersectionObserver(function (es) { visible = es[0].isIntersecting; if (visible) kick(); }).observe(hero);
     var D = 180 / Math.PI, center = new T.Vector3(0, 0.2, -0.12);
+    if (/armdebug/.test(location.search)) window.__dwArmDbg = { goal: goal, cur: cur, q: q, solve: solve, fk: fk, hit: hit, mouse: mouse };
     function pad(n) { var s = String(Math.round(n)); while (s.length < 5) s = ' ' + s; return s; }
 
     function frame(now) {
-      running = true;
       now = now || performance.now();
       var dt = Math.min(0.1, (now - last) / 1000); last = now;
       t += dt * 0.48;
@@ -137,8 +153,14 @@
         goal.set(-0.03 + 0.16 * Math.sin(t * 0.9), 0.27 + 0.09 * Math.sin(t * 1.7), -0.24 - 0.05 * Math.cos(t * 0.9));
       }
       goal.y = Math.max(0.03, Math.min(goal.y, 0.6));
+      // Keep the target off the base axis, where the yaw angle becomes ill-defined and whips around.
+      var hx = goal.x - P1.x, hz = goal.z - P1.z, hr = Math.hypot(hx, hz);
+      if (hr < 0.12) {
+        if (hr < 1e-4) { hx = -Math.sin(q[0]); hz = -Math.cos(q[0]); hr = 1; }
+        goal.x = P1.x + hx / hr * 0.12; goal.z = P1.z + hz / hr * 0.12;
+      }
       cur.lerp(goal, reduce ? 1 : 1 - Math.exp(-dt * 7));
-      ik(cur);
+      ik(cur, reduce ? 0 : dt);
       var err = fk(q, new T.Vector3()).distanceTo(cur) * 1000;
       tgt.position.copy(cur); tgt.rotation.y += dt * 1.8;
       disc.position.set(cur.x, 0.002, cur.z);
@@ -163,7 +185,7 @@
         holder[tag[1]].add(g);
       });
       stage.classList.add('on');
-      requestAnimationFrame(frame);
+      ready = true; kick();
     };
     var onFail = function () { stage.remove(); ro.remove(); };
     var loader = new T.GLTFLoader();
