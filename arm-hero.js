@@ -262,9 +262,7 @@
       // The arm moves with the cursor, so test its actual meshes (cheap: each mesh's bounding sphere is checked first).
       // In the arm view the tip chases the cursor, so only the base and first link count as "the arm" there.
       var ah = ray.intersectObjects(view === 'arm' ? armCore : armMeshes, false), da = ah.length ? ah[0].distance : Infinity;
-      if (ah.length) armHit.copy(ah[0].point);
-      if (db < Infinity && da < Infinity && ah[0].point.y > balBox.max.y) db = Infinity;   // arm reaching over the balancer wins
-      if (db < Infinity || da < Infinity) hovered = db <= da ? 'bal' : 'arm';
+      if (ah.length) armHit.copy(ah[0].point);      if (db < Infinity || da < Infinity) hovered = db <= da ? 'bal' : 'arm';
     }
     function showTip(dt) {
       var it = hovered && ITEMS[hovered];
